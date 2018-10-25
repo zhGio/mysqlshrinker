@@ -6,7 +6,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -81,13 +80,19 @@ public class MySSRunner implements CommandLineRunner {
 		List<Table> tables = new ArrayList<>();
 		String schemaPattern = "ina";
 		log.info("Getting tables for schema pattern {}", schemaPattern);
+
+		int count = 0;
+
 		try (ResultSet originTablesRs = originMetaData.getTables(null, schemaPattern, WILDCARD, null)) {
 			while (originTablesRs.next()) {
-				String tableName = originTablesRs.getString(TABLE_NAME); // get the table name only
-				if ("bank_codes".equals(tableName)) { // TODO: remove
-					tables.add(new Table(schemaPattern, tableName));
-					log.info("Created table {}", tableName);
+				if (count == 10) {
+					break;
 				}
+				String tableName = originTablesRs.getString(TABLE_NAME); // get the table name only
+				//								if (tableName.equals("billing_commission_levels"))
+				tables.add(new Table(schemaPattern, tableName));
+				log.info("Created table {}", tableName);
+				count++;
 			}
 		}
 
@@ -99,8 +104,8 @@ public class MySSRunner implements CommandLineRunner {
 		tables.forEach(table -> setIndices(originMetaData, table));
 		tables.forEach(table -> table.writeCreateStatement());
 
-		// NEED TO SORT FIRST
-		Collections.sort(tables, (o1, o2) -> {
+		// sort so we write down the ones that have no foreign keys first!
+		tables.sort((o1, o2) -> {
 			if (o1.getForeignKeys().isEmpty()) {
 				return -1;
 			} else if (o2.getForeignKeys().isEmpty()) {
@@ -242,9 +247,12 @@ public class MySSRunner implements CommandLineRunner {
 	 * but the column resultSet would return 10
 	 */
 	private int calculateIntegerColumnSize(DatabaseMetaData metaData, String tableName, String colName) throws SQLException {
-		ResultSet resultSet = metaData.getConnection().createStatement().executeQuery("SELECT " + colName + " FROM " + tableName + " WHERE 1 = 0");
-		resultSet.next();
-		return resultSet.getMetaData().getPrecision(1);
+		ResultSet resultSet = metaData.getConnection().createStatement().executeQuery("SELECT " + BACKTICK + colName + BACKTICK + " FROM " + BACKTICK + tableName + BACKTICK + " WHERE 1 = 0");
+		if (resultSet.next()) {
+			return resultSet.getMetaData().getPrecision(1);
+		} else {
+			return 0;
+		}
 	}
 
 	private DataType getMySqlDataType(int type) {
@@ -334,8 +342,9 @@ public class MySSRunner implements CommandLineRunner {
 							.append(COMMA).append(SPACE)
 			);
 			//@formatter:on
-
-			sb.append("PRIMARY KEY (").append(BACKTICK).append(this.primaryKey.columnName).append(BACKTICK).append(")");
+			if (this.primaryKey != null) {
+				sb.append("PRIMARY KEY (").append(BACKTICK).append(this.primaryKey.columnName).append(BACKTICK).append(")");
+			}
 
 			/*
 			 * appending indices
@@ -442,7 +451,8 @@ public class MySSRunner implements CommandLineRunner {
 
 	@Bean(name = "dataSourceOrigin")
 	public DataSource getDataSourceOrigin() {
-		return DataSourceBuilder.create().url(ORIGIN_SCHEMA_URL + ORIGIN_SCHEMA_NAME).username(MySqlShrinkerApplication.USER_NAME).password(MySqlShrinkerApplication.PASSWORD).driverClassName("com.mysql.jdbc.Driver").build();
+		return DataSourceBuilder.create().url(ORIGIN_SCHEMA_URL + ORIGIN_SCHEMA_NAME).username(MySqlShrinkerApplication.USER_NAME).password(MySqlShrinkerApplication.PASSWORD)
+				.driverClassName("com.mysql.jdbc.Driver").build();
 	}
 
 	@Bean(name = "dataSourceDestination")
