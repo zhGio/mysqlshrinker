@@ -1,3 +1,4 @@
 .idea/
 *.iml
 target/
+src/main/java/zhgio/myss/MySqlShrinkerApplication.java
