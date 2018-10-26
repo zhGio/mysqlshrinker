@@ -10,8 +10,8 @@ import lombok.extern.log4j.Log4j2;
 @Log4j2
 public class MySqlShrinkerApplication {
 
-	public static final String USER_NAME = "?";
-	public static final String PASSWORD = "?";
+	static final String USER_NAME = "?";
+	static final String PASSWORD = "?";
 
 	public static void main(String[] args) {
 		ConfigurableApplicationContext run = SpringApplication.run(MySqlShrinkerApplication.class, args);
