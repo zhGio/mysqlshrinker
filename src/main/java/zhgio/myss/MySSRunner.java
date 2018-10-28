@@ -6,15 +6,20 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
 
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.jdbc.DataSourceBuilder;
@@ -31,9 +36,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.ToString;
 import lombok.extern.log4j.Log4j2;
 
+import static zhgio.myss.MySSRunner.DataType.BIT;
+import static zhgio.myss.MySSRunner.DataType.DATE;
 import static zhgio.myss.MySSRunner.DataType.DATETIME;
 import static zhgio.myss.MySSRunner.DataType.DECIMAL;
 import static zhgio.myss.MySSRunner.DataType.INT;
+import static zhgio.myss.MySSRunner.DataType.TINYINT;
 
 @Configuration
 @ConditionalOnClass(DataSource.class)
@@ -65,7 +73,7 @@ public class MySSRunner implements CommandLineRunner {
 	private static final String SPACE = " ";
 	private static final String COMMA = ",";
 	private static final String EMPTY_STR = "";
-	public static final String DECIMAL_DIGITS = "DECIMAL_DIGITS";
+	private static final String DECIMAL_DIGITS = "DECIMAL_DIGITS";
 
 	@Override
 	public void run(String... args) throws Exception {
@@ -81,45 +89,34 @@ public class MySSRunner implements CommandLineRunner {
 		String schemaPattern = "ina";
 		log.info("Getting tables for schema pattern {}", schemaPattern);
 
-		int count = 0;
-
 		try (ResultSet originTablesRs = originMetaData.getTables(null, schemaPattern, WILDCARD, null)) {
 			while (originTablesRs.next()) {
-				if (count == 10) {
-					break;
-				}
 				String tableName = originTablesRs.getString(TABLE_NAME); // get the table name only
-				//								if (tableName.equals("billing_commission_levels"))
+				//				if (tableName.equals("bank_codes"))
 				tables.add(new Table(schemaPattern, tableName));
 				log.info("Created table {}", tableName);
-				count++;
 			}
 		}
 
 		tables.forEach(table -> setTableColumns(originMetaData, table));
+		tables.forEach(table -> table.setTableTypeDetails(getDataSourceOrigin()));
 		tables.forEach(table -> setTableSize(getDataSourceOrigin(), table));
 		tables.forEach(table -> setTableRowLengthApprox(getDataSourceOrigin(), table));
-		tables.forEach(table -> setTablePrimaryKey(originMetaData, table));
+		tables.forEach(table -> setTablePrimaryKeys(originMetaData, table));
 		tables.forEach(table -> setTableForeignKeys(originMetaData, table));
 		tables.forEach(table -> setIndices(originMetaData, table));
-		tables.forEach(table -> table.writeCreateStatement());
+		tables.forEach(Table::writeCreateStatement);
 
 		// sort so we write down the ones that have no foreign keys first!
-		tables.sort((o1, o2) -> {
-			if (o1.getForeignKeys().isEmpty()) {
+		tables.sort(Comparator.comparing(Table::getForeignKeys, (fk1, fk2) -> {
+			if (fk1.isEmpty()) {
 				return -1;
-			} else if (o2.getForeignKeys().isEmpty()) {
+			} else if (fk2.isEmpty()) {
 				return 1;
 			} else {
-				if (o1.getForeignKeys().size() == o2.getForeignKeys().size()) {
-					return 0;
-				} else if (o1.getForeignKeys().size() < o2.getForeignKeys().size()) {
-					return -1;
-				} else {
-					return 1;
-				}
+				return Integer.compare(fk1.size(), fk2.size());
 			}
-		});
+		}));
 
 		tables.forEach(table -> table.copyTableToSchema(getDataSourceDestination()));
 	}
@@ -130,7 +127,6 @@ public class MySSRunner implements CommandLineRunner {
 			while (indicesRs.next()) {
 
 				String indexTableReference = indicesRs.getString("TABLE_NAME");
-				String indexQualifier = indicesRs.getString("INDEX_QUALIFIER");
 				String indexName = indicesRs.getString("INDEX_NAME");
 				short indexOrdinalPosition = indicesRs.getShort("ORDINAL_POSITION");
 				String indexColumnName = indicesRs.getString("COLUMN_NAME");
@@ -141,7 +137,7 @@ public class MySSRunner implements CommandLineRunner {
 						Index index = indices.get(indexName);
 						index.getColumnReferences().add(indexColumnName);
 					} else {
-						Index index = new Index(indexTableReference, indexName, "INDEX", new LinkedHashSet<>(Collections.singleton(indexColumnName)), "A".equals(ascDesc));
+						Index index = new Index(indexTableReference, indexName, new LinkedHashSet<>(Collections.singleton(indexColumnName)), "A".equals(ascDesc));
 						indices.put(indexName, index);
 					}
 				}
@@ -170,18 +166,20 @@ public class MySSRunner implements CommandLineRunner {
 		}
 	}
 
-	private void setTablePrimaryKey(DatabaseMetaData metaData, Table table) {
+	private void setTablePrimaryKeys(DatabaseMetaData metaData, Table table) {
 		try (ResultSet primaryKeyRs = metaData.getPrimaryKeys(null, table.getSchemaName(), table.getTableName())) {
+			Set<Key> primaryKeys = new HashSet<>();
 			while (primaryKeyRs.next()) {
 				String keyName = primaryKeyRs.getString("COLUMN_NAME");
 				String keyType = primaryKeyRs.getString("PK_NAME");
 				Key key;
 				if (keyType.equals("PRIMARY")) {
 					key = new Key(true, table.getTableName(), keyName);
-					table.setPrimaryKey(key);
+					primaryKeys.add(key);
 				}
 				log.info("col name {} & pk name {}", keyName, keyType);
 			}
+			table.setPrimaryKeys(primaryKeys);
 		} catch (SQLException e) {
 			e.printStackTrace();
 		}
@@ -218,14 +216,6 @@ public class MySSRunner implements CommandLineRunner {
 				col.setColumnName(colName);
 				DataType dataType = getMySqlDataType(columnsResultSet.getInt(DATA_TYPE));
 				col.setType(dataType);
-				if (dataType != INT) { // TODO: handle other versions of int!
-					col.setColumnSize(columnsResultSet.getInt(COLUMN_SIZE));
-				} else {
-					col.setColumnSize(calculateIntegerColumnSize(metaData, tableName, colName));
-				}
-				if (dataType == DECIMAL) {
-					col.setDecimalDigits(columnsResultSet.getInt(DECIMAL_DIGITS));
-				}
 				col.setAutoincrement(columnsResultSet.getString(IS_AUTOINCREMENT).equals(YES));
 				col.setNullable(columnsResultSet.getString(IS_NULLABLE).equals(YES));
 				table.getColumns().add(col);
@@ -239,19 +229,6 @@ public class MySSRunner implements CommandLineRunner {
 
 		} catch (SQLException e) {
 			log.error("SQLException in setTableColumns with tableName {}.\n {}", table.getTableName(), e);
-		}
-	}
-
-	/**
-	 * Returns the column size for the INT types since COLUMN_SIZE from the column metadata will return precision in that case and not the column size we want (i.e. INT(21)) - we want 21 as the result
-	 * but the column resultSet would return 10
-	 */
-	private int calculateIntegerColumnSize(DatabaseMetaData metaData, String tableName, String colName) throws SQLException {
-		ResultSet resultSet = metaData.getConnection().createStatement().executeQuery("SELECT " + BACKTICK + colName + BACKTICK + " FROM " + BACKTICK + tableName + BACKTICK + " WHERE 1 = 0");
-		if (resultSet.next()) {
-			return resultSet.getMetaData().getPrecision(1);
-		} else {
-			return 0;
 		}
 	}
 
@@ -291,11 +268,10 @@ public class MySSRunner implements CommandLineRunner {
 
 	@Data
 	@AllArgsConstructor
-	@ToString(exclude = { "tableName", "type", "isAscending" })
+	@ToString(exclude = { "tableName", "isAscending" })
 	private class Index {
 		private String tableName;
 		private String indexName;
-		private String type; // PRIMARY / INDEX
 		private LinkedHashSet<String> columnReferences; // needs to preserve the insertion order so we can identify ordinal position of every column reference
 		private boolean isAscending;
 	}
@@ -316,13 +292,25 @@ public class MySSRunner implements CommandLineRunner {
 		private JdbcTemplate jdbcTemplate;
 
 		// table PK column name
-		private Key primaryKey;
+		private Set<Key> primaryKeys;
 
 		// collection of FKs: key - referenced table name, value - foreign key column
 		private Set<Key> foreignKeys;
 		private Set<Index> indices;
 
 		private String createTableStatement;
+
+		/**
+		 * sets columns size, decimal precision and signed/unsigned
+		 * because this sort of data is missing in the databaseMetaData object or is inconsistent
+		 */
+		public void setTableTypeDetails(DataSource dataSource) {
+			JdbcTemplate template = new JdbcTemplate(dataSource);
+			log.info("Running DESC for type details on table {}", this.getTableName());
+			List<Map<String, Object>> rows = template.queryForList("DESC " + this.getTableName());
+			Map<String, Column> columnsAsMap = this.getColumnsAsMap();
+			rows.forEach(rowMap -> columnsAsMap.get(rowMap.get("Field")).updateColumnFromTypeString(rowMap.get("Type")));
+		}
 
 		void writeCreateStatement() {
 			StringBuilder sb = new StringBuilder("CREATE TABLE ");
@@ -335,15 +323,27 @@ public class MySSRunner implements CommandLineRunner {
 			this.columns.forEach(
 					column ->
 							sb.append(BACKTICK).append(column.getColumnName()).append(BACKTICK).append(SPACE)
-							.append(column.getType()).append(appendColumnSize(column)).append(SPACE)
+							.append(column.getType().equals(BIT) ? TINYINT : column.getType()).append(appendColumnSize(column)).append(column.isUnsigned ? " unsigned " : SPACE)
 							.append(!column.isNullable() ? "NOT NULL " : EMPTY_STR)
 							.append(column.isDefaultable() ? " DEFAULT " + column.getDefaultValue() : column.isNullable() ? " DEFAULT NULL " : EMPTY_STR)
 							.append(column.isAutoincrement() ? "AUTO_INCREMENT" : EMPTY_STR)
 							.append(COMMA).append(SPACE)
 			);
 			//@formatter:on
-			if (this.primaryKey != null) {
-				sb.append("PRIMARY KEY (").append(BACKTICK).append(this.primaryKey.columnName).append(BACKTICK).append(")");
+
+			/*
+			 * append primary key(s)
+			 */
+			if (this.primaryKeys != null && !this.primaryKeys.isEmpty()) {
+				//@formatter:off
+				sb.append("PRIMARY KEY (");
+				this.primaryKeys.forEach(
+						primaryKey ->
+									sb.append(BACKTICK).append(primaryKey.columnName).append(BACKTICK).append(COMMA)
+
+				);
+				//@formatter:on
+				sb.deleteCharAt(sb.length() - 1).append(")"); // delete last comma
 			}
 
 			/*
@@ -357,9 +357,8 @@ public class MySSRunner implements CommandLineRunner {
 							sb.append("KEY ").append(BACKTICK).append(index.getIndexName())
 							.append(BACKTICK).append(SPACE).append("(")
 							.append(listToString(index.getColumnReferences()))
-							.append(")").append(COMMA)
+							.append(")").append(COMMA).append(SPACE)
 				);
-				sb.deleteCharAt(sb.length() - 1); // remove last comma
 			}
 			//@formatter:on
 
@@ -381,7 +380,21 @@ public class MySSRunner implements CommandLineRunner {
 			} else {
 				sb.append(")");
 			}
+
+			findAndRemoveDanglingComma(sb);
+
 			this.createTableStatement = sb.toString();
+		}
+
+		private void findAndRemoveDanglingComma(StringBuilder sb) {
+			int lastIndexOfClosedParentheses = sb.lastIndexOf(")");
+			String charBeforeLastIndex = String.valueOf(sb.charAt(lastIndexOfClosedParentheses - 1));
+			String char2IndicesBeforeLastIndex = String.valueOf(sb.charAt(lastIndexOfClosedParentheses - 2));
+			if (COMMA.equals(charBeforeLastIndex)) {
+				sb.deleteCharAt(lastIndexOfClosedParentheses - 1);
+			} else if (SPACE.equals(charBeforeLastIndex) && COMMA.equals(char2IndicesBeforeLastIndex)) {
+				sb.deleteCharAt(lastIndexOfClosedParentheses - 2);
+			}
 		}
 
 		public void copyTableToSchema(DataSource dataSourceDestination) {
@@ -391,6 +404,14 @@ public class MySSRunner implements CommandLineRunner {
 			log.info("copying table {} to destination");
 			this.jdbcTemplate.execute(this.getCreateTableStatement());
 		}
+
+		/**
+		 * @return the columns as key-value pairs where the key is the column name
+		 */
+		public Map<String, Column> getColumnsAsMap() {
+			return this.getColumns().stream().collect(Collectors.toMap(Column::getColumnName, col -> col));
+		}
+
 	}
 
 	private String listToString(LinkedHashSet<String> columnReferences) {
@@ -401,10 +422,12 @@ public class MySSRunner implements CommandLineRunner {
 	}
 
 	private String appendColumnSize(Column column) {
+		int columnSize = column.getColumnSize();
 		if (column.getType() == DECIMAL) {
-			return "(" + column.getColumnSize() + "," + column.getDecimalDigits() + ")";
-		} else if (column.getType() != DATETIME) {
-			return "(" + column.getColumnSize() + ")";
+			int decimalDigits = column.getDecimalDigits();
+			return "(" + (columnSize == 0 ? EMPTY_STR : columnSize) + "," + (decimalDigits == 0 ? EMPTY_STR : decimalDigits) + ")";
+		} else if (column.getType() != DATETIME && column.getType() != DATE) {
+			return (columnSize == 0 ? EMPTY_STR : "(" + columnSize + ")");
 		} else {
 			return EMPTY_STR;
 		}
@@ -428,6 +451,7 @@ public class MySSRunner implements CommandLineRunner {
 	@AllArgsConstructor
 	@RequiredArgsConstructor
 	private class Column {
+		private static final int DECIMAL_DIGITS_DEFAULT_VALUE = 0;
 		@ToString.Exclude
 		private final Table table;
 		private String columnName;
@@ -441,8 +465,36 @@ public class MySSRunner implements CommandLineRunner {
 		private boolean defaultable;
 		@ToString.Exclude
 		private String defaultValue;
-		@ToString.Exclude
 		private int decimalDigits;
+		@ToString.Exclude
+		private boolean isUnsigned;
+
+		/**
+		 * extract info like columnSize, decimalDigits precision and signed/unsigned from the type String
+		 * @param type - a string type which will equal to something like "int(11)" or "decimal(12,6)" so we want to extract data between parentheses only
+		 */
+		public void updateColumnFromTypeString(Object type) {
+			String typeStr = (String) type;
+			Pattern pattern = Pattern.compile("\\((.*?)\\)");
+			Matcher matcher = pattern.matcher(typeStr);
+			if (matcher.find()) {
+				String matchGroup = matcher.group(1);
+				if (StringUtils.startsWith(typeStr, "decimal")) {
+					if (matchGroup.contains(",")) {
+						String[] matchGroupSplit = matchGroup.split(",");
+						this.columnSize = Integer.valueOf(matchGroupSplit[0]);
+						this.decimalDigits = Integer.valueOf(matchGroupSplit[1]);
+					} else {
+						this.columnSize = Integer.valueOf(matchGroup);
+						this.decimalDigits = DECIMAL_DIGITS_DEFAULT_VALUE;
+					}
+				} else {
+					this.columnSize = Integer.valueOf(matchGroup);
+					this.decimalDigits = DECIMAL_DIGITS_DEFAULT_VALUE;
+				}
+			}
+			this.isUnsigned = StringUtils.contains(typeStr, "unsigned");
+		}
 	}
 
 	enum DataType {
