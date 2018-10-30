@@ -95,7 +95,7 @@ public class MySSRunner implements CommandLineRunner {
 		try (ResultSet originTablesRs = originMetaData.getTables(null, schemaPattern, WILDCARD, new String[] {"TABLE"})) {
 			while (originTablesRs.next()) {
 				String tableName = originTablesRs.getString(TABLE_NAME); // get the table name only
-								if (tableName.equals("recommendations"))
+//								if (tableName.equals("recommendations"))
 				tables.add(new Table(schemaPattern, tableName));
 				log.info("Created table {}", tableName);
 			}
