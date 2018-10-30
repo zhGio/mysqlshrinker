@@ -5,6 +5,7 @@ import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -40,6 +41,7 @@ import static zhgio.myss.MySSRunner.DataType.BIT;
 import static zhgio.myss.MySSRunner.DataType.DATE;
 import static zhgio.myss.MySSRunner.DataType.DATETIME;
 import static zhgio.myss.MySSRunner.DataType.DECIMAL;
+import static zhgio.myss.MySSRunner.DataType.ENUM;
 import static zhgio.myss.MySSRunner.DataType.INT;
 import static zhgio.myss.MySSRunner.DataType.TINYINT;
 
@@ -89,10 +91,11 @@ public class MySSRunner implements CommandLineRunner {
 		String schemaPattern = "ina";
 		log.info("Getting tables for schema pattern {}", schemaPattern);
 
-		try (ResultSet originTablesRs = originMetaData.getTables(null, schemaPattern, WILDCARD, null)) {
+		// TABLE param filters only tables, otherwise we would get tables, views, etc
+		try (ResultSet originTablesRs = originMetaData.getTables(null, schemaPattern, WILDCARD, new String[] {"TABLE"})) {
 			while (originTablesRs.next()) {
 				String tableName = originTablesRs.getString(TABLE_NAME); // get the table name only
-				//				if (tableName.equals("bank_codes"))
+								if (tableName.equals("recommendations"))
 				tables.add(new Table(schemaPattern, tableName));
 				log.info("Created table {}", tableName);
 			}
@@ -125,13 +128,12 @@ public class MySSRunner implements CommandLineRunner {
 		try (ResultSet indicesRs = metaData.getIndexInfo(null, table.getSchemaName(), table.getTableName(), false, false)) {
 			Map<String, Index> indices = new HashMap<>();
 			while (indicesRs.next()) {
-
 				String indexTableReference = indicesRs.getString("TABLE_NAME");
 				String indexName = indicesRs.getString("INDEX_NAME");
 				short indexOrdinalPosition = indicesRs.getShort("ORDINAL_POSITION");
 				String indexColumnName = indicesRs.getString("COLUMN_NAME");
 				String ascDesc = indicesRs.getString("ASC_OR_DESC");
-
+				log.debug("Dealing with new index {} for table {}", indexName, table.getTableName());
 				if (!"PRIMARY".equals(indexName)) { // we dont want to re-index the primary key
 					if (indexOrdinalPosition > 1 && indices.containsKey(indexName)) {
 						Index index = indices.get(indexName);
@@ -143,6 +145,7 @@ public class MySSRunner implements CommandLineRunner {
 				}
 			}
 			table.setIndices(new LinkedHashSet<>(indices.values()));
+			log.info("Set {} indices for table {}", indices.size(), table.getTableName());
 		} catch (SQLException e) {
 			e.printStackTrace();
 		}
@@ -159,8 +162,9 @@ public class MySSRunner implements CommandLineRunner {
 				String fkColumnName = foreignKeyRs.getString("FKCOLUMN_NAME");
 				key = new Key(false, referencingTableName, referencingColumnName, fkName, fkColumnName);
 				table.getForeignKeys().add(key);
-				log.info("constraint {} foreign key {} referencing table {} with pk {}", fkName, fkColumnName, referencingTableName, referencingColumnName);
+				log.debug("Constraint {} foreign key {} referencing table {} with pk {} added", fkName, fkColumnName, referencingTableName, referencingColumnName);
 			}
+			log.info("Foreign key constraints set for table {}", table.getTableName());
 		} catch (SQLException e) {
 			e.printStackTrace();
 		}
@@ -177,9 +181,10 @@ public class MySSRunner implements CommandLineRunner {
 					key = new Key(true, table.getTableName(), keyName);
 					primaryKeys.add(key);
 				}
-				log.info("col name {} & pk name {}", keyName, keyType);
+				log.debug("column name {} & pk name {}", keyName, keyType);
 			}
 			table.setPrimaryKeys(primaryKeys);
+			log.info("Set primary key(s) for table {}", table.getTableName());
 		} catch (SQLException e) {
 			e.printStackTrace();
 		}
@@ -187,10 +192,10 @@ public class MySSRunner implements CommandLineRunner {
 
 	private void setTableRowLengthApprox(DataSource dataSource, Table table) {
 		NamedParameterJdbcTemplate template = new NamedParameterJdbcTemplate(dataSource);
-		log.info("checking row length approx on table {}", table.getTableName());
+		log.debug("Checking row length approx on table {}", table.getTableName());
 		@SuppressWarnings("ConstantConditions") long approxTableRowCount = template
 				.queryForObject("SHOW TABLE STATUS WHERE name = :name;", new MapSqlParameterSource().addValue("name", table.getTableName()), (rs, rowNum) -> rs.getLong("Rows"));
-		log.info("Approx number of rows for table {} is {} rows.", table.getTableName(), approxTableRowCount);
+		log.info("Approx number of rows for table {} is {} rows", table.getTableName(), approxTableRowCount);
 		table.setNumberOfRowsApprox(approxTableRowCount);
 	}
 
@@ -199,7 +204,7 @@ public class MySSRunner implements CommandLineRunner {
 		@SuppressWarnings("ConstantConditions") int sizeInMb = template
 				.queryForObject(QUERY_SIZE_ONE_TABLE, new MapSqlParameterSource().addValue("tableSchema", table.getSchemaName()).addValue("tableName", table.getTableName()),
 						(rs, rowNum) -> rs.getInt("size-MB"));
-		log.info("Size for table {} is {} MB.", table.getTableName(), sizeInMb);
+		log.debug("Size for table {} is {} MB", table.getTableName(), sizeInMb);
 		table.setTableSizeInMb(BigDecimal.valueOf(sizeInMb));
 	}
 
@@ -306,13 +311,15 @@ public class MySSRunner implements CommandLineRunner {
 		 */
 		public void setTableTypeDetails(DataSource dataSource) {
 			JdbcTemplate template = new JdbcTemplate(dataSource);
-			log.info("Running DESC for type details on table {}", this.getTableName());
+			log.debug("Running DESC for type details on table {}", this.getTableName());
 			List<Map<String, Object>> rows = template.queryForList("DESC " + this.getTableName());
 			Map<String, Column> columnsAsMap = this.getColumnsAsMap();
 			rows.forEach(rowMap -> columnsAsMap.get(rowMap.get("Field")).updateColumnFromTypeString(rowMap.get("Type")));
+			log.info("Set type details for table {}", tableName);
 		}
 
 		void writeCreateStatement() {
+			log.info("Starting to write the CREATE statement for table {}", this.tableName);
 			StringBuilder sb = new StringBuilder("CREATE TABLE ");
 			sb.append(BACKTICK).append(this.getTableName()).append(BACKTICK).append(SPACE).append("(").append(SPACE);
 
@@ -323,13 +330,14 @@ public class MySSRunner implements CommandLineRunner {
 			this.columns.forEach(
 					column ->
 							sb.append(BACKTICK).append(column.getColumnName()).append(BACKTICK).append(SPACE)
-							.append(column.getType().equals(BIT) ? TINYINT : column.getType()).append(appendColumnSize(column)).append(column.isUnsigned ? " unsigned " : SPACE)
+							.append(column.getType().equals(BIT) ? TINYINT : column.getType()).append(appendColumnDetails(column)).append(column.isUnsigned ? " unsigned " : SPACE)
 							.append(!column.isNullable() ? "NOT NULL " : EMPTY_STR)
 							.append(column.isDefaultable() ? " DEFAULT " + column.getDefaultValue() : column.isNullable() ? " DEFAULT NULL " : EMPTY_STR)
 							.append(column.isAutoincrement() ? "AUTO_INCREMENT" : EMPTY_STR)
 							.append(COMMA).append(SPACE)
 			);
 			//@formatter:on
+			log.debug("Appended columns");
 
 			/*
 			 * append primary key(s)
@@ -345,6 +353,7 @@ public class MySSRunner implements CommandLineRunner {
 				//@formatter:on
 				sb.deleteCharAt(sb.length() - 1).append(")"); // delete last comma
 			}
+			log.debug("Appended primary keys");
 
 			/*
 			 * appending indices
@@ -361,7 +370,7 @@ public class MySSRunner implements CommandLineRunner {
 				);
 			}
 			//@formatter:on
-
+			log.debug("Appended indices");
 			/*
 			 * append constraints / foreign keys
 			 */
@@ -380,10 +389,13 @@ public class MySSRunner implements CommandLineRunner {
 			} else {
 				sb.append(")");
 			}
+			log.debug("Appended foreign key constraints");
 
 			findAndRemoveDanglingComma(sb);
 
 			this.createTableStatement = sb.toString();
+			log.info("Wrote the create statement successfully");
+			log.debug(this.createTableStatement);
 		}
 
 		private void findAndRemoveDanglingComma(StringBuilder sb) {
@@ -401,7 +413,7 @@ public class MySSRunner implements CommandLineRunner {
 			if (this.jdbcTemplate == null) {
 				this.jdbcTemplate = new JdbcTemplate(dataSourceDestination);
 			}
-			log.info("copying table {} to destination");
+			log.info("Executing CREATE TABLE statement for table {}", this.tableName);
 			this.jdbcTemplate.execute(this.getCreateTableStatement());
 		}
 
@@ -421,12 +433,14 @@ public class MySSRunner implements CommandLineRunner {
 		return resultBuilder.toString();
 	}
 
-	private String appendColumnSize(Column column) {
+	private String appendColumnDetails(Column column) {
 		int columnSize = column.getColumnSize();
-		if (column.getType() == DECIMAL) {
+		if (DECIMAL == column.getType()) {
 			int decimalDigits = column.getDecimalDigits();
 			return "(" + (columnSize == 0 ? EMPTY_STR : columnSize) + "," + (decimalDigits == 0 ? EMPTY_STR : decimalDigits) + ")";
-		} else if (column.getType() != DATETIME && column.getType() != DATE) {
+		} else if (ENUM == column.getType() && !column.getEnums().isEmpty()) {
+			return "(" + String.join(",", column.getEnums()) + ")";
+		} else if (DATETIME != column.getType() && DATE != column.getType()) { // dates have no precision
 			return (columnSize == 0 ? EMPTY_STR : "(" + columnSize + ")");
 		} else {
 			return EMPTY_STR;
@@ -468,6 +482,8 @@ public class MySSRunner implements CommandLineRunner {
 		private int decimalDigits;
 		@ToString.Exclude
 		private boolean isUnsigned;
+		@ToString.Exclude
+		private List<String> enums;
 
 		/**
 		 * extract info like columnSize, decimalDigits precision and signed/unsigned from the type String
@@ -475,30 +491,49 @@ public class MySSRunner implements CommandLineRunner {
 		 */
 		public void updateColumnFromTypeString(Object type) {
 			String typeStr = (String) type;
-			Pattern pattern = Pattern.compile("\\((.*?)\\)");
-			Matcher matcher = pattern.matcher(typeStr);
+			Matcher matcher = Pattern.compile("\\((.*?)\\)").matcher(typeStr);
+			log.debug("matching type {} for column {} in table {}", typeStr, this.columnName, this.table.tableName);
 			if (matcher.find()) {
 				String matchGroup = matcher.group(1);
 				if (StringUtils.startsWith(typeStr, "decimal")) {
-					if (matchGroup.contains(",")) {
-						String[] matchGroupSplit = matchGroup.split(",");
-						this.columnSize = Integer.valueOf(matchGroupSplit[0]);
-						this.decimalDigits = Integer.valueOf(matchGroupSplit[1]);
-					} else {
-						this.columnSize = Integer.valueOf(matchGroup);
-						this.decimalDigits = DECIMAL_DIGITS_DEFAULT_VALUE;
-					}
+					parseDecimalTypeValues(matchGroup);
+				} else if (StringUtils.startsWith(typeStr, "enum")) {
+					// enum type is wrongly set as type CHAR so we change it here to our own enum
+					this.setType(ENUM);
+					parseEnumTypeValues(matchGroup);
 				} else {
+					log.debug("setting default type values for string {}", matchGroup);
 					this.columnSize = Integer.valueOf(matchGroup);
 					this.decimalDigits = DECIMAL_DIGITS_DEFAULT_VALUE;
 				}
 			}
 			this.isUnsigned = StringUtils.contains(typeStr, "unsigned");
 		}
+
+		private void parseEnumTypeValues(String matchGroup) {
+			log.debug("parsing enum type values for string {}", matchGroup);
+			if (matchGroup.contains(",")) {
+				this.enums = Arrays.stream(matchGroup.split(",")).map(String::trim).collect(Collectors.toList());
+			} else {
+				this.enums = Collections.singletonList(matchGroup);
+			}
+		}
+
+		private void parseDecimalTypeValues(String matchGroup) {
+			log.debug("parsing decimal type values for string {}", matchGroup);
+			if (matchGroup.contains(",")) {
+				int[] numbers = Arrays.stream(matchGroup.split(",")).map(String::trim).mapToInt(Integer::parseInt).toArray();
+				this.columnSize = numbers[0];
+				this.decimalDigits = numbers[1];
+			} else {
+				this.columnSize = Integer.valueOf(matchGroup);
+				this.decimalDigits = DECIMAL_DIGITS_DEFAULT_VALUE;
+			}
+		}
 	}
 
 	enum DataType {
-		INT, SMALLINT, TINYINT, BIGINT, FLOAT, DOUBLE, CHAR, VARCHAR, DATE, TIME, DATETIME, BOOLEAN, DECIMAL, BIT
+		INT, SMALLINT, TINYINT, BIGINT, FLOAT, DOUBLE, CHAR, VARCHAR, DATE, TIME, DATETIME, BOOLEAN, DECIMAL, BIT, ENUM
 	}
 
 	@Bean(name = "dataSourceOrigin")
