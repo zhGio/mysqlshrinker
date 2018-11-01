@@ -7,7 +7,6 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -98,7 +97,7 @@ public class MySSRunner implements CommandLineRunner {
 		try (ResultSet originTablesRs = originMetaData.getTables(null, schemaPattern, WILDCARD, new String[] { "TABLE" })) {
 			while (originTablesRs.next()) {
 				String tableName = originTablesRs.getString(TABLE_NAME); // get the table name only
-//				if (tableName.equals("billing_verified_commission_histories"))
+//				if (!tableName.equals("acquisitions"))
 					tables.add(new Table(schemaPattern, tableName));
 				log.info("Created table {}", tableName);
 			}
@@ -112,19 +111,10 @@ public class MySSRunner implements CommandLineRunner {
 		tables.forEach(table -> setTableForeignKeys(originMetaData, table));
 		tables.forEach(table -> setIndices(originMetaData, table));
 		tables.forEach(Table::writeCreateStatement);
+		tables.forEach(table -> table.executeStatement(getDataSourceDestination()));
+		tables.stream().filter(table -> !table.getForeignKeys().isEmpty()).forEach(Table::writeAlterTableAddFkConstraintsStatement);
+		tables.stream().filter(table -> !table.getForeignKeys().isEmpty()).forEach(table -> table.executeStatement(getDataSourceDestination()));
 
-		// sort so we write down the ones that have no foreign keys first!
-		tables.sort(Comparator.comparing(Table::getForeignKeys, (fk1, fk2) -> {
-			if (fk1.isEmpty()) {
-				return -1;
-			} else if (fk2.isEmpty()) {
-				return 1;
-			} else {
-				return Integer.compare(fk1.size(), fk2.size());
-			}
-		}));
-
-		tables.forEach(table -> table.copyTableToSchema(getDataSourceDestination()));
 	}
 
 	private void setIndices(DatabaseMetaData metaData, Table table) {
@@ -211,7 +201,6 @@ public class MySSRunner implements CommandLineRunner {
 		table.setTableSizeInMb(BigDecimal.valueOf(sizeInMb));
 	}
 
-	// TODO: FIX table zones varchar not having size/precision
 	private void setTableColumns(DatabaseMetaData metaData, Table table) {
 		String tableName = table.getTableName();
 		try (ResultSet columnsResultSet = metaData.getColumns(null, metaData.getConnection().getSchema(), tableName, WILDCARD)) {
@@ -309,7 +298,7 @@ public class MySSRunner implements CommandLineRunner {
 		private Set<Key> foreignKeys;
 		private Set<Index> indices;
 
-		private String createTableStatement;
+		private String sqlStatement;
 
 		/**
 		 * sets columns size, decimal precision, signed/unsigned, Extra column
@@ -326,7 +315,7 @@ public class MySSRunner implements CommandLineRunner {
 		}
 
 		void writeCreateStatement() {
-			log.info("Starting to write the CREATE statement for table {}", this.tableName);
+			log.info("Starting to write the CREATE TABLE statement for table {}", this.tableName);
 			StringBuilder sb = new StringBuilder("CREATE TABLE IF NOT EXISTS ");
 			sb.append(BACKTICK).append(this.getTableName()).append(BACKTICK).append(SPACE).append("(").append(SPACE);
 
@@ -379,54 +368,49 @@ public class MySSRunner implements CommandLineRunner {
 			}
 			//@formatter:on
 			log.debug("Appended indices");
-			/*
-			 * append constraints / foreign keys
-			 */
-			if (!this.foreignKeys.isEmpty()) {
-				//@formatter:off
-				this.foreignKeys.forEach(
-					fk ->
-						 sb.append(" CONSTRAINT ").append(BACKTICK)
-						 .append(fk.getFkName()).append(BACKTICK).append(SPACE)
-						 .append("FOREIGN KEY (").append(BACKTICK).append(fk.getFkColumnName()).append(BACKTICK).append(")")
-						 .append(" REFERENCES ").append(BACKTICK).append(fk.getTableName()).append(BACKTICK)
-						 .append(" (").append(BACKTICK).append(fk.getColumnName()).append(BACKTICK).append(") ").append(COMMA)
-			);
-				//@formatter:on
-				sb.deleteCharAt(sb.length() - 1).append(")"); // remove last comma
-			} else {
-				sb.append(")");
-			}
-			log.debug("Appended foreign key constraints");
 
-			findAndRemoveDanglingComma(sb);
+			StringBuilder newSb; // have to reassign the string builder because forEach complains about mutability
+			newSb = findAndRemoveDanglingComma(sb);
 
-			this.createTableStatement = sb.toString();
-			log.info("Wrote the create statement successfully");
-			log.debug(this.createTableStatement);
+			newSb.append(")");
+			this.sqlStatement = newSb.toString();
+			log.info("Wrote the CREATE TABLE statement successfully");
+			log.debug(this.sqlStatement);
 		}
 
 		private boolean isBitOrBoolean(Column column) {
 			return column.getType().equals(BIT) || column.getType().equals(BOOLEAN);
 		}
 
-		private void findAndRemoveDanglingComma(StringBuilder sb) {
-			int lastIndexOfClosedParentheses = sb.lastIndexOf(")");
-			String charBeforeLastIndex = String.valueOf(sb.charAt(lastIndexOfClosedParentheses - 1));
-			String char2IndicesBeforeLastIndex = String.valueOf(sb.charAt(lastIndexOfClosedParentheses - 2));
-			if (COMMA.equals(charBeforeLastIndex)) {
-				sb.deleteCharAt(lastIndexOfClosedParentheses - 1);
-			} else if (SPACE.equals(charBeforeLastIndex) && COMMA.equals(char2IndicesBeforeLastIndex)) {
-				sb.deleteCharAt(lastIndexOfClosedParentheses - 2);
+		/**
+		 * deletes some possible dangling commas in the string builder
+		 * @param sb - query string builder
+		 */
+		private StringBuilder findAndRemoveDanglingComma(StringBuilder sb) {
+			// check if comma is the last character
+			// have to reassign the sb because trimming can only be called on string objects
+			StringBuilder newSb = new StringBuilder(sb.toString().trim());
+			char lastChar = newSb.charAt(newSb.length() - 1);
+			if (String.valueOf(lastChar).equals(COMMA)) {
+				return newSb.deleteCharAt(newSb.length() - 1);
 			}
+			//			int lastIndexOfClosedParentheses = sb.lastIndexOf(")");
+			//			String charBeforeLastIndex = String.valueOf(sb.charAt(lastIndexOfClosedParentheses - 1));
+			//			String char2IndicesBeforeLastIndex = String.valueOf(sb.charAt(lastIndexOfClosedParentheses - 2));
+			//			if (COMMA.equals(charBeforeLastIndex)) {
+			//				return newSb.deleteCharAt(lastIndexOfClosedParentheses - 1);
+			//			} else if (SPACE.equals(charBeforeLastIndex) && COMMA.equals(char2IndicesBeforeLastIndex)) {
+			//				return newSb.deleteCharAt(lastIndexOfClosedParentheses - 2);
+			//			}
+			return newSb;
 		}
 
-		public void copyTableToSchema(DataSource dataSourceDestination) {
+		public void executeStatement(DataSource dataSourceDestination) {
 			if (this.jdbcTemplate == null) {
 				this.jdbcTemplate = new JdbcTemplate(dataSourceDestination);
 			}
-			log.info("Executing CREATE TABLE statement for table {}", this.tableName);
-			this.jdbcTemplate.execute(this.getCreateTableStatement());
+			log.info("Executing SQL statement for table {}", this.tableName);
+			this.jdbcTemplate.execute(this.getSqlStatement());
 		}
 
 		/**
@@ -436,6 +420,26 @@ public class MySSRunner implements CommandLineRunner {
 			return this.getColumns().stream().collect(Collectors.toMap(Column::getColumnName, Function.identity()));
 		}
 
+		public void writeAlterTableAddFkConstraintsStatement() {
+			log.info("Starting to write the ALTER TABLE statement for table {}", this.tableName);
+
+			StringBuilder sb = new StringBuilder("ALTER TABLE ");
+			sb.append(this.tableName);
+
+			//@formatter:off
+			this.foreignKeys.forEach(
+				fk ->
+					 sb.append(" ADD CONSTRAINT ").append(BACKTICK)
+					 .append(fk.getFkName()).append(BACKTICK).append(SPACE)
+					 .append("FOREIGN KEY (").append(BACKTICK).append(fk.getFkColumnName()).append(BACKTICK).append(")")
+					 .append(" REFERENCES ").append(BACKTICK).append(fk.getTableName()).append(BACKTICK)
+					 .append(" (").append(BACKTICK).append(fk.getColumnName()).append(BACKTICK).append(") ").append(COMMA)
+			);
+			//@formatter:on
+			sb.deleteCharAt(sb.length() - 1); // delete last comma
+			log.info("Wrote the ALTER TABLE statement successfully");
+			this.sqlStatement = sb.toString();
+		}
 	}
 
 	private String listToString(LinkedHashSet<String> columnReferences) {
