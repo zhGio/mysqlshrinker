@@ -14,6 +14,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -40,6 +41,7 @@ import lombok.extern.log4j.Log4j2;
 import static zhgio.myss.MySSRunner.DataType.BIT;
 import static zhgio.myss.MySSRunner.DataType.BOOLEAN;
 import static zhgio.myss.MySSRunner.DataType.DATE;
+import static zhgio.myss.MySSRunner.DataType.DATETIME;
 import static zhgio.myss.MySSRunner.DataType.DECIMAL;
 import static zhgio.myss.MySSRunner.DataType.ENUM;
 import static zhgio.myss.MySSRunner.DataType.TIME;
@@ -96,7 +98,7 @@ public class MySSRunner implements CommandLineRunner {
 		try (ResultSet originTablesRs = originMetaData.getTables(null, schemaPattern, WILDCARD, new String[] { "TABLE" })) {
 			while (originTablesRs.next()) {
 				String tableName = originTablesRs.getString(TABLE_NAME); // get the table name only
-//				if (tableName.equals("password_histories"))
+//				if (tableName.equals("billing_verified_commission_histories"))
 					tables.add(new Table(schemaPattern, tableName));
 				log.info("Created table {}", tableName);
 			}
@@ -208,6 +210,7 @@ public class MySSRunner implements CommandLineRunner {
 		log.debug("Size for table {} is {} MB", table.getTableName(), sizeInMb);
 		table.setTableSizeInMb(BigDecimal.valueOf(sizeInMb));
 	}
+
 	// TODO: FIX table zones varchar not having size/precision
 	private void setTableColumns(DatabaseMetaData metaData, Table table) {
 		String tableName = table.getTableName();
@@ -263,7 +266,7 @@ public class MySSRunner implements CommandLineRunner {
 		case 91:
 			return DataType.DATE;
 		case 92:
-			return TIME;
+			return DataType.TIME;
 		case 93:
 			return DataType.TIMESTAMP;
 		case 16:
@@ -314,8 +317,8 @@ public class MySSRunner implements CommandLineRunner {
 		 */
 		public void setTableDetailsAndExtras(DataSource dataSource) {
 			JdbcTemplate template = new JdbcTemplate(dataSource);
-			log.debug("Running DESC for type details on table {}", this.getTableName());
-			List<Map<String, Object>> rows = template.queryForList("DESC " + this.getTableName());
+			log.debug("Running DESCRIBE for type details on table {}", this.getTableName());
+			List<Map<String, Object>> rows = template.queryForList("DESCRIBE " + this.getTableName());
 			Map<String, Column> columnsAsMap = this.getColumnsAsMap();
 			rows.forEach(rowMap -> columnsAsMap.get(rowMap.get("Field")).updateColumnFromTypeString(rowMap.get("Type")));
 			rows.forEach(rowMap -> columnsAsMap.get(rowMap.get("Field")).updateColumnFromExtraString(rowMap.get("Extra")));
@@ -324,7 +327,7 @@ public class MySSRunner implements CommandLineRunner {
 
 		void writeCreateStatement() {
 			log.info("Starting to write the CREATE statement for table {}", this.tableName);
-			StringBuilder sb = new StringBuilder("CREATE TABLE ");
+			StringBuilder sb = new StringBuilder("CREATE TABLE IF NOT EXISTS ");
 			sb.append(BACKTICK).append(this.getTableName()).append(BACKTICK).append(SPACE).append("(").append(SPACE);
 
 			/*
@@ -334,7 +337,7 @@ public class MySSRunner implements CommandLineRunner {
 			this.columns.forEach(
 					column ->
 							sb.append(BACKTICK).append(column.getColumnName()).append(BACKTICK).append(SPACE)
-							.append(isBitOrBoolean(column) ? TINYINT : column.getType()).append(isBitOrBoolean(column) ? appendColumnDetails(column) : EMPTY_STR).append(column.isUnsigned ? " unsigned " : SPACE)
+							.append(isBitOrBoolean(column) ? TINYINT : column.getType() == TIMESTAMP ? DATETIME : column.getType()).append(isBitOrBoolean(column) ? "(1) ": appendColumnDetails(column)).append(column.isUnsigned ? " unsigned " : SPACE)
 							.append(!column.isNullable() ? "NOT NULL " : EMPTY_STR)
 							.append(column.isDefaultable() ? " DEFAULT " + column.getDefaultValue() : column.isNullable() ? " DEFAULT NULL " : EMPTY_STR)
 							.append(column.isAutoincrement() ? "AUTO_INCREMENT" : EMPTY_STR)
@@ -430,7 +433,7 @@ public class MySSRunner implements CommandLineRunner {
 		 * @return the columns as key-value pairs where the key is the column name
 		 */
 		public Map<String, Column> getColumnsAsMap() {
-			return this.getColumns().stream().collect(Collectors.toMap(Column::getColumnName, col -> col));
+			return this.getColumns().stream().collect(Collectors.toMap(Column::getColumnName, Function.identity()));
 		}
 
 	}
@@ -495,6 +498,15 @@ public class MySSRunner implements CommandLineRunner {
 		private List<String> enums;
 		@ToString.Exclude
 		private String extra;
+
+		public String getDefaultValue() { // datetime types throw an sql grammar exception if create table statement is executed with a month 00 and day 00
+			if (this.type == DATE || this.type == DATETIME || this.type == TIMESTAMP || this.type == TIME) {
+				if (StringUtils.contains(this.defaultValue, "-00-00")) {
+					return StringUtils.replace(this.defaultValue, "-00-00", "-01-01");
+				}
+			}
+			return defaultValue;
+		}
 
 		/**
 		 * extract info like columnSize, decimalDigits precision and signed/unsigned from the Type column produced by DESC `tablename`
@@ -563,7 +575,7 @@ public class MySSRunner implements CommandLineRunner {
 		// Regular MySQL Data Types
 		CHAR, VARCHAR, BLOB, ENUM, // text data types
 		TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE, DECIMAL, // numeric data types
-		DATE, TIME, TIMESTAMP, // date data types
+		DATE, TIME, TIMESTAMP, DATETIME,// date data types
 
 		// added from java.sql.Types
 		BOOLEAN, BIT
