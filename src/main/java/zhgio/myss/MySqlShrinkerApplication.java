@@ -12,6 +12,8 @@ public class MySqlShrinkerApplication {
 
 	static final String USER_NAME = "?";
 	static final String PASSWORD = "?";
+	static final String DB_ENGINE = "?";
+	static final String DEFAULT_CHARSET = "?";
 
 	public static void main(String[] args) {
 		ConfigurableApplicationContext run = SpringApplication.run(MySqlShrinkerApplication.class, args);
