@@ -2,6 +2,8 @@ package zhgio.myss.runners;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -33,18 +35,40 @@ import static zhgio.myss.MySqlShrinkerApplication.ORIGIN_SCHEMA_URL;
 public class MySSRunner implements CommandLineRunner {
 
 	@Override
-	public void run(String... args){
+	public void run(String... args) {
 
 		log.info("MySQLShrinker application runner starting!");
 		try {
 			Schemer originSchemer = new Schemer(getDataSourceOrigin());
 			Schemer destinationSchemer = new Schemer(getDataSourceDestination());
-			List<Table> tables = cloneTables(originSchemer, destinationSchemer);
+			List<Table> tables = originSchemer.getAllTablesFromSchema(ORIGIN_SCHEMA_NAME);
+
+			cloneTables(originSchemer, destinationSchemer, tables);
 			addConstraints(originSchemer, destinationSchemer, tables);
+			setTableSizesAndPrintSorted(originSchemer, tables);
 
 		} catch (SQLException e) {
 			log.error("Aborted everything in the Runner#run method.");
 		}
+	}
+
+	private void setTableSizesAndPrintSorted(Schemer originSchemer, List<Table> tables) {
+		tables.forEach(table -> setTableSizes(originSchemer, table));
+		tables.sort(Collections.reverseOrder(Comparator.comparingLong(Table::getNumberOfRowsApprox)));
+		log.info("SORTING BY ROWS APPROX: ");
+		tables.forEach(table -> log.info("table: {} | num of rows approx: {} | size in mb: {}", table.getTableName(), table.getNumberOfRowsApprox(), table.getTableSizeInMb()));
+
+		log.info("SORTING BY MB WEIGHT: ");
+		tables.sort(Collections.reverseOrder(Comparator.comparing(table -> table.getTableSizeInMb().intValue())));
+		tables.forEach(table -> log.info("table: {} | num of rows approx: {} | size in mb: {}", table.getTableName(), table.getNumberOfRowsApprox(), table.getTableSizeInMb()));
+
+	}
+
+	private void setTableSizes(Schemer originSchemer, Table table) {
+		BigDecimal tableSize = originSchemer.getTableSize(table);
+		table.setTableSizeInMb(tableSize);
+		long tableRowLengthApprox = originSchemer.getTableRowLengthApprox(table);
+		table.setNumberOfRowsApprox(tableRowLengthApprox);
 	}
 
 	private void addConstraints(Schemer originSchemer, Schemer destinationSchemer, List<Table> tables) {
@@ -54,18 +78,13 @@ public class MySSRunner implements CommandLineRunner {
 		tables.stream().filter(table -> !table.getForeignKeys().isEmpty()).forEach(destinationSchemer::executeStatement);
 	}
 
-	private List<Table> cloneTables(Schemer originSchemer, Schemer destinationSchemer) throws SQLException {
-		List<Table> tables = originSchemer.getAllTablesFromSchema(ORIGIN_SCHEMA_NAME);
+	private void cloneTables(Schemer originSchemer, Schemer destinationSchemer, List<Table> tables) throws SQLException {
 
 		for (Table table : tables) {
 			Set<Column> tableColumnsFromMetaData = originSchemer.getTableColumnsFromMetaData(table);
 			table.setColumns(tableColumnsFromMetaData);
 			List<Map<String, Object>> tableDetailsAndExtras = originSchemer.getTableDetailsAndExtras(table);
 			table.setTableDetailsAndExtras(tableDetailsAndExtras);
-			BigDecimal tableSize = originSchemer.getTableSize(table);
-			table.setTableSizeInMb(tableSize);
-			long tableRowLengthApprox = originSchemer.getTableRowLengthApprox(table);
-			table.setNumberOfRowsApprox(tableRowLengthApprox);
 			Set<Key> tablePrimaryKeysFromMetaData = originSchemer.getTablePrimaryKeysFromMetaData(table);
 			table.setPrimaryKeys(tablePrimaryKeysFromMetaData);
 			Set<Index> tableIndicesFromMetadata = originSchemer.getTableIndicesFromMetadata(table);
@@ -76,7 +95,6 @@ public class MySSRunner implements CommandLineRunner {
 
 		// execute a create table statement
 		tables.forEach(destinationSchemer::executeStatement);
-		return tables;
 	}
 
 	@Bean(name = "dataSourceOrigin")
