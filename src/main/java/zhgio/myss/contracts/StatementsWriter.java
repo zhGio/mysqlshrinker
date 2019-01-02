@@ -1,11 +1,9 @@
 package zhgio.myss.contracts;
 
 
-public interface MetaDataWriter {
+public interface StatementsWriter {
 
 	void writeCreateStatement();
 
-
 	void writeAlterTableAddFkConstraintsStatement();
-
 }

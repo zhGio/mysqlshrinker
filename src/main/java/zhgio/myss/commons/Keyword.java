@@ -14,10 +14,6 @@ public class Keyword {
 	public static final String SQL_DATA_TYPE = "SQL_DATA_TYPE";
 
 	public static final String YES = "YES";
-	public static final String DESTINATION_SCHEMA_URL = "jdbc:mysql://localhost:3306/";
-	public static final String DESTINATION_SCHEMA_NAME = "ina_trimmed";
-	public static final String ORIGIN_SCHEMA_URL = "jdbc:mysql://localhost:3355/";
-	public static final String ORIGIN_SCHEMA_NAME = "ina";
 	public static final String BACKTICK = "`";
 	public static final String SPACE = " ";
 	public static final String COMMA = ",";
