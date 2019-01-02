@@ -21,6 +21,7 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 import lombok.extern.slf4j.Slf4j;
 import zhgio.myss.commons.DataType;
+import zhgio.myss.commons.Query;
 import zhgio.myss.contracts.Executor;
 import zhgio.myss.contracts.MetaDataExplorer;
 import zhgio.myss.elements.Column;
@@ -95,7 +96,7 @@ public class Schemer implements Executor, MetaDataExplorer {
 	public long getTableRowLengthApprox(Table table) {
 		log.debug("Checking row length approx on table {}", table.getTableName());
 		@SuppressWarnings("ConstantConditions") long approxTableRowCount = namedParamTemplate
-				.queryForObject("SHOW TABLE STATUS WHERE name = :name;", new MapSqlParameterSource().addValue("name", table.getTableName()), (rs, rowNum) -> rs.getLong("Rows"));
+				.queryForObject(Query.QUERY_TABLE_STATUS, new MapSqlParameterSource().addValue("name", table.getTableName()), (rs, rowNum) -> rs.getLong("Rows"));
 		log.info("Approx number of rows for table {} is {} rows", table.getTableName(), approxTableRowCount);
 		return approxTableRowCount;
 	}
